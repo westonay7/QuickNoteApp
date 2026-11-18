@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+bun.lock
+bun.lockb
+
+node_modules
+dist
+dist-ssr
+dev-dist
+*.local
+
+# Environment variables (never commit real credentials)
+.env
+.env.*
+!.env.example
+
+# Android signing keys and build artifacts (never commit keystores)
+*.keystore
+*.jks
+signing-key-info.txt
+*.apk
+*.aab
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

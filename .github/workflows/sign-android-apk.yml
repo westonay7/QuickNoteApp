@@ -1,0 +1,271 @@
+name: Sign & Attach Android APK to Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'GitHub Release tag to sign (leave blank to use the latest release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  sign-android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Locate Android SDK build-tools
+        run: |
+          set -euo pipefail
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BT_DIR=""
+
+          if [ -d "$ANDROID_SDK/build-tools" ]; then
+            for d in $(ls -1d "$ANDROID_SDK/build-tools"/* 2>/dev/null | sort -V -r); do
+              if [ -x "$d/zipalign" ] && [ -x "$d/apksigner" ]; then
+                BT_DIR="$d"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$BT_DIR" ]; then
+            SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_SDK/cmdline-tools/latest/bin/sdkmanager")"
+            if [ ! -x "$SDKMANAGER" ]; then
+              echo "::error::Android SDK build-tools and sdkmanager were not found on runner."
+              exit 1
+            fi
+            (yes || true) | "$SDKMANAGER" --sdk_root="$ANDROID_SDK" "build-tools;35.0.0" >/dev/null
+            BT_DIR="$ANDROID_SDK/build-tools/35.0.0"
+          fi
+
+          echo "$BT_DIR" >> "$GITHUB_PATH"
+          echo "Using Android build-tools: $BT_DIR"
+
+      - name: Resolve target GitHub Release
+        id: release_info
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            TAG_NAME="$RELEASE_EVENT_TAG"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          else
+            TAG_NAME="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+
+          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "null" ]; then
+            echo "::error::No GitHub Release found. Publish a GitHub Release with your PWABuilder APK or ZIP attached first."
+            exit 1
+          fi
+
+          ASSETS_JSON="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets)"
+          HAS_SIGNED="$(echo "$ASSETS_JSON" | jq -r '[.assets[].name | select(. == "QuickNote-signed.apk")] | length')"
+
+          if [ "${GITHUB_EVENT_NAME}" = "release" ] && [ "$HAS_SIGNED" -gt 0 ]; then
+            echo "QuickNote-signed.apk is already attached to release $TAG_NAME. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Download release APK or PWABuilder ZIP
+        if: steps.release_info.outputs.skip != 'true'
+        id: source_apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p apk-work/raw apk-work/unzipped
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir apk-work/raw
+
+          INPUT_APK=""
+          ALREADY_SIGNED="false"
+
+          # 1. Prefer any uploaded .apk other than QuickNote-signed.apk
+          for f in apk-work/raw/*.apk; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"
+            if [ "$base" != "QuickNote-signed.apk" ]; then
+              INPUT_APK="$f"
+              break
+            fi
+          done
+
+          # 2. If only QuickNote-signed.apk exists (manual re-run), allow re-checking it
+          if [ -z "$INPUT_APK" ] && [ -f "apk-work/raw/QuickNote-signed.apk" ]; then
+            INPUT_APK="apk-work/raw/QuickNote-signed.apk"
+          fi
+
+          # 3. If the user uploaded the PWABuilder .zip directly, extract and inspect it
+          if [ -z "$INPUT_APK" ]; then
+            for z in apk-work/raw/*.zip; do
+              [ -e "$z" ] || continue
+              unzip -qo "$z" -d apk-work/unzipped
+              break
+            done
+
+            SIGNED_IN_ZIP="$(find apk-work/unzipped -type f -iname '*signed*.apk' ! -iname '*unsigned*' | head -n 1 || true)"
+            if [ -n "$SIGNED_IN_ZIP" ]; then
+              INPUT_APK="$SIGNED_IN_ZIP"
+            else
+              INPUT_APK="$(find apk-work/unzipped -type f -iname '*.apk' | head -n 1 || true)"
+            fi
+          fi
+
+          if [ -z "$INPUT_APK" ] || [ ! -f "$INPUT_APK" ]; then
+            echo "::error::No .apk or PWABuilder .zip asset found in release $TAG_NAME. Upload the APK or ZIP from PWABuilder to the release and re-run."
+            exit 1
+          fi
+
+          echo "Found source APK: $INPUT_APK"
+
+          # Check if the APK already passes modern Android v2/v3 signature verification
+          if apksigner verify --min-sdk-version 30 "$INPUT_APK" >/dev/null 2>&1; then
+            ALREADY_SIGNED="true"
+            echo "Source APK already passes Android v2/v3 apksigner verification."
+          else
+            echo "Source APK is unsigned or lacks modern Android v2/v3 signature. Will align and sign it."
+          fi
+
+          echo "input_apk=$INPUT_APK" >> "$GITHUB_OUTPUT"
+          echo "already_signed=$ALREADY_SIGNED" >> "$GITHUB_OUTPUT"
+
+      - name: Align, Sign, and Verify Android APK
+        if: steps.release_info.outputs.skip != 'true'
+        id: sign_step
+        env:
+          INPUT_APK: ${{ steps.source_apk.outputs.input_apk }}
+          ALREADY_SIGNED: ${{ steps.source_apk.outputs.already_signed }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          HAS_CUSTOM_KEYSTORE="false"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            HAS_CUSTOM_KEYSTORE="true"
+          fi
+
+          if [ "$ALREADY_SIGNED" = "true" ] && [ "$HAS_CUSTOM_KEYSTORE" = "false" ]; then
+            cp "$INPUT_APK" apk-work/QuickNote-signed.apk
+            SIGNING_MODE="preserved-pwabuilder-signature"
+          else
+            cp "$INPUT_APK" apk-work/unsigned.apk
+
+            # Remove any stale/incomplete META-INF signature entries before aligning & signing
+            zip -d apk-work/unsigned.apk \
+              'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' 'META-INF/MANIFEST.MF' \
+              >/dev/null 2>&1 || true
+
+            # Align to 4-byte boundaries and 4096-byte page boundaries (required on Android 11+)
+            zipalign -p -f 4 apk-work/unsigned.apk apk-work/aligned.apk
+            zipalign -c -p 4 apk-work/aligned.apk
+
+            if [ "$HAS_CUSTOM_KEYSTORE" = "true" ]; then
+              echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > apk-work/release.keystore
+              KS_PATH="apk-work/release.keystore"
+              KS_ALIAS="$ANDROID_KEY_ALIAS"
+              KS_PASS="$ANDROID_KEYSTORE_PASSWORD"
+              KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+              SIGNING_MODE="repository-secret-keystore"
+            else
+              KS_PATH="apk-work/ephemeral-release.keystore"
+              KS_ALIAS="quicknote"
+              KS_PASS="$(openssl rand -hex 24)"
+              KEY_PASS="$KS_PASS"
+              echo "::add-mask::$KS_PASS"
+
+              keytool -genkeypair -v \
+                -keystore "$KS_PATH" \
+                -storetype PKCS12 \
+                -alias "$KS_ALIAS" \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass "$KS_PASS" \
+                -keypass "$KEY_PASS" \
+                -dname "CN=QuickNote, OU=Mobile, O=QuickNote, L=Internet, S=NA, C=US" \
+                >/dev/null 2>&1
+              SIGNING_MODE="ephemeral-release-keystore"
+            fi
+
+            apksigner sign \
+              --ks "$KS_PATH" \
+              --ks-key-alias "$KS_ALIAS" \
+              --ks-pass "pass:$KS_PASS" \
+              --key-pass "pass:$KEY_PASS" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out apk-work/QuickNote-signed.apk \
+              apk-work/aligned.apk
+
+            rm -f apk-work/release.keystore apk-work/ephemeral-release.keystore
+          fi
+
+          # Strictly verify final APK signature before uploading to the Release
+          VERIFY_OUT="$(apksigner verify --verbose --print-certs apk-work/QuickNote-signed.apk)"
+          echo "$VERIFY_OUT"
+
+          SHA256_RAW="$(echo "$VERIFY_OUT" | grep -m1 'certificate SHA-256 digest:' | awk '{print $NF}' || true)"
+          SHA256_COLON="$(echo "$SHA256_RAW" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g;s/:$//')"
+
+          PKG_NAME="unknown"
+          if command -v aapt2 >/dev/null 2>&1; then
+            PKG_LINE="$(aapt2 dump badging apk-work/QuickNote-signed.apk 2>/dev/null | head -n 1 || true)"
+            echo "APK package info: $PKG_LINE"
+            PKG_NAME="$(echo "$PKG_LINE" | sed -n "s/.*name='\([^']*\)'.*/\1/p")"
+          fi
+
+          echo "signing_mode=$SIGNING_MODE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256_COLON" >> "$GITHUB_OUTPUT"
+          echo "package_name=${PKG_NAME:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload QuickNote-signed.apk to GitHub Release
+        if: steps.release_info.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
+          SIGNING_MODE: ${{ steps.sign_step.outputs.signing_mode }}
+          PKG_NAME: ${{ steps.sign_step.outputs.package_name }}
+          SHA256: ${{ steps.sign_step.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG_NAME" apk-work/QuickNote-signed.apk --repo "$GITHUB_REPOSITORY" --clobber
+
+          {
+            echo "## QuickNote Android APK Signed & Attached"
+            echo ""
+            echo "- **Release:** \`$TAG_NAME\`"
+            echo "- **Installable APK:** \`QuickNote-signed.apk\` (aligned + verified with Android v1/v2/v3 signatures)"
+            echo "- **Package ID:** \`$PKG_NAME\`"
+            echo "- **Signing mode:** \`$SIGNING_MODE\`"
+            if [ -n "$SHA256" ]; then
+              echo "- **SHA-256 Certificate Fingerprint:** \`$SHA256\`"
+            fi
+            echo ""
+            echo "Download **\`QuickNote-signed.apk\`** from the GitHub Release page on your Android phone to install it."
+            if [ "$SIGNING_MODE" = "ephemeral-release-keystore" ]; then
+              echo ""
+              echo "> **Tip for future updates:** Because no persistent keystore secrets were configured, a fresh release key was generated for this build. To allow in-place updates on Android without uninstalling first, either choose **Signing key: New** in PWABuilder and upload \`app-release-signed.apk\`, or save your keystore in GitHub Secrets (\`ANDROID_KEYSTORE_BASE64\`, \`ANDROID_KEYSTORE_PASSWORD\`, \`ANDROID_KEY_ALIAS\`, \`ANDROID_KEY_PASSWORD\`)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
