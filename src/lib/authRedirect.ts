@@ -25,22 +25,47 @@ function isLocalhostHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
 }
 
+function getNormalizedBasePrefix(): string {
+  const base = import.meta.env.BASE_URL || '/'
+  const withLeading = base.startsWith('/') ? base : `/${base}`
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
+}
+
+/**
+ * Resolves the production root URL for the active deployment.
+ * - Uses explicit `VITE_SITE_URL` when configured
+ * - Otherwise uses the live production origin + Vite `BASE_URL`
+ *   (e.g. `https://westonay7.github.io/QuickNoteApp/` or `https://westonay7.github.io/`)
+ * - Falls back to `PRODUCTION_SITE_URL` if running outside a production host
+ */
+function getProductionBaseUrl(): string {
+  const configured = (import.meta.env.VITE_SITE_URL as string | undefined)?.trim()
+  if (configured && /^https?:\/\//.test(configured)) {
+    return configured.endsWith('/') ? configured : `${configured}/`
+  }
+
+  if (
+    typeof window !== 'undefined' &&
+    !import.meta.env.DEV &&
+    !isLocalhostHost(window.location.hostname)
+  ) {
+    return `${window.location.origin}${getNormalizedBasePrefix()}`
+  }
+
+  return PRODUCTION_SITE_URL
+}
+
 /**
  * Returns the email confirmation redirect URL for Supabase `signUp` and `resend`.
  * - In local development (`npm run dev` on localhost): keeps `http://localhost:<port>/`
- * - In production: uses `https://westonay7.github.io/` (or `VITE_SITE_URL` if set)
+ * - In production: uses `VITE_SITE_URL`, or the live GitHub Pages app URL (`origin + BASE_URL`)
  */
 export function getEmailRedirectUrl(): string {
   if (typeof window !== 'undefined' && import.meta.env.DEV && isLocalhostHost(window.location.hostname)) {
     return `${window.location.origin}/`
   }
 
-  const configured = (import.meta.env.VITE_SITE_URL as string | undefined)?.trim()
-  if (configured && /^https?:\/\//.test(configured)) {
-    return configured.endsWith('/') ? configured : `${configured}/`
-  }
-
-  return PRODUCTION_SITE_URL
+  return getProductionBaseUrl()
 }
 
 /**
@@ -51,14 +76,7 @@ export function getPasswordResetRedirectUrl(): string {
     return `${window.location.origin}/reset-password`
   }
 
-  const base = import.meta.env.BASE_URL || '/'
-  const prefix = base.endsWith('/') ? base : `${base}/`
-
-  if (typeof window !== 'undefined' && !isLocalhostHost(window.location.hostname)) {
-    return `${window.location.origin}${prefix}reset-password`
-  }
-
-  return `${PRODUCTION_SITE_URL}reset-password`
+  return `${getProductionBaseUrl()}reset-password`
 }
 
 /**

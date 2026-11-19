@@ -113,6 +113,7 @@ export default defineConfig(({ command }) => {
       stripCloudflareRedirectsPlugin(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: 'inline',
         manifestFilename: 'manifest.webmanifest',
         includeAssets: [
           'favicon.svg',
@@ -139,6 +140,7 @@ export default defineConfig(({ command }) => {
           start_url: base,
           scope: base,
           categories: ['productivity', 'utilities'],
+          prefer_related_applications: false,
           launch_handler: {
             client_mode: 'navigate-existing',
           },
