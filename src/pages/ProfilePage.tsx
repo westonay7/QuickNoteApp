@@ -5,6 +5,7 @@ import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
 import { Badge, Button, Field, Input, Skeleton } from '@/components/ui'
 import { changePassword, reauthenticate } from '@/lib/api'
+import { getEmailRedirectUrl } from '@/lib/authRedirect'
 import { friendlyError, getSupabase } from '@/lib/supabase'
 import { fieldErrors, changePasswordSchema, profileSchema, type FieldErrors } from '@/lib/validation'
 import { fullDate, initials } from '@/lib/format'
@@ -183,7 +184,11 @@ export function ProfilePage() {
                     variant="secondary"
                     onClick={() =>
                       void getSupabase()
-                        .auth.resend({ type: 'signup', email })
+                        .auth.resend({
+                          type: 'signup',
+                          email,
+                          options: { emailRedirectTo: getEmailRedirectUrl() },
+                        })
                         .then(({ error }) => {
                           if (error) throw new Error(friendlyError(error))
                           toast.success('Verification email resent')

@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { MailCheck } from 'lucide-react'
 import { AuthLayout } from '@/components/AuthLayout'
-import { appUrl } from '@/lib/appUrl'
+import { getPasswordResetRedirectUrl } from '@/lib/authRedirect'
 import { Button, Field, Input } from '@/components/ui'
 import { fieldErrors, forgotPasswordSchema, type FieldErrors } from '@/lib/validation'
 import { friendlyError, getSupabase } from '@/lib/supabase'
@@ -31,7 +31,7 @@ export function ForgotPassword() {
     setSubmitting(true)
     try {
       await getSupabase().auth.resetPasswordForEmail(parsed.data.email, {
-        redirectTo: appUrl('/reset-password'),
+        redirectTo: getPasswordResetRedirectUrl(),
       })
       setSent(true)
       toast.success('Password reset email sent')

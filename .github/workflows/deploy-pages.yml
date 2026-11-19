@@ -41,13 +41,19 @@ jobs:
 
       - name: Verify Pages build output
         run: |
-          REPO_BASE="/${{ github.event.repository.name }}/"
+          REPO_NAME="${{ github.event.repository.name }}"
+          if [[ "$REPO_NAME" == *.github.io ]]; then
+            REPO_BASE="/"
+          else
+            REPO_BASE="/${REPO_NAME}/"
+          fi
           test -f dist/index.html
           test -f dist/404.html
           test -f dist/app/index.html
           test -f dist/.nojekyll
           test -f dist/manifest.webmanifest
           test -f dist/sw.js
+          test -f dist/.well-known/assetlinks.json
           grep -q "$REPO_BASE" dist/index.html
           grep -q "$REPO_BASE" dist/manifest.webmanifest
 

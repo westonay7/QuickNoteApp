@@ -69,19 +69,27 @@ function stripCloudflareRedirectsPlugin(): Plugin {
 }
 
 /**
- * Generates GitHub Pages SPA fallback files (`404.html`, `app/index.html`, and `.nojekyll`)
- * when building under a repository subpath such as `/QuickNote---A-Premium-Note-App/`.
- * This ensures deep links (`/app`, `/signin`, `/auth/callback`) load cleanly and
- * direct visits or PWABuilder scans of `/QuickNote---A-Premium-Note-App/app` receive HTTP 200.
+ * Generates GitHub Pages SPA fallback files (`404.html`, `app/index.html`, and `.nojekyll`).
+ * Always emits `.nojekyll` so dot-directories like `.well-known/assetlinks.json` are served
+ * cleanly on GitHub Pages, and emits SPA fallbacks for GitHub Pages deployments (both root
+ * `*.github.io` sites and repository subpaths such as `/QuickNote---A-Premium-Note-App/`).
  */
 function githubPagesSpaPlugin(base: string): Plugin {
   return {
     name: 'github-pages-spa-fallback',
     closeBundle() {
-      if (base === '/') return
       const distDir = fileURLToPath(new URL('./dist', import.meta.url))
       const indexHtml = path.join(distDir, 'index.html')
       if (!fs.existsSync(indexHtml)) return
+
+      // Always emit .nojekyll so GitHub Pages never ignores .well-known/assetlinks.json
+      fs.writeFileSync(path.join(distDir, '.nojekyll'), '')
+
+      const isPagesBuild =
+        base !== '/' ||
+        process.env.GITHUB_ACTIONS === 'true' ||
+        process.env.npm_lifecycle_event === 'build:pages'
+      if (!isPagesBuild) return
 
       const html = fs.readFileSync(indexHtml, 'utf8')
       fs.writeFileSync(path.join(distDir, '404.html'), html)
@@ -89,8 +97,6 @@ function githubPagesSpaPlugin(base: string): Plugin {
       const appDir = path.join(distDir, 'app')
       fs.mkdirSync(appDir, { recursive: true })
       fs.writeFileSync(path.join(appDir, 'index.html'), html)
-
-      fs.writeFileSync(path.join(distDir, '.nojekyll'), '')
     },
   }
 }

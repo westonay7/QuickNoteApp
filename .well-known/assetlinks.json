@@ -1,8 +1,0 @@
-[{
-      "relation": ["delegate_permission/common.handle_all_urls"],
-      "target": {
-        "namespace": "android_app",
-        "package_name": "io.github.westonay7.twa",
-        "sha256_cert_fingerprints": ["FF:52:E4:5E:25:9E:39:C2:BC:BF:42:EC:06:93:94:0E:FE:EB:0C:6F:71:16:4B:16:FB:09:27:B0:A4:70:4F:5A"]
-      }
-    }]

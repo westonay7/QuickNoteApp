@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { MailOpen } from 'lucide-react'
 import { AuthLayout } from '@/components/AuthLayout'
 import { Button } from '@/components/ui'
+import { getEmailRedirectUrl } from '@/lib/authRedirect'
 import { friendlyError, getSupabase } from '@/lib/supabase'
 import { useToast } from '@/state/ToastContext'
 
@@ -24,7 +25,11 @@ export function VerifyEmail() {
     if (!email) return
     setResending(true)
     try {
-      const { error } = await getSupabase().auth.resend({ type: 'signup', email })
+      const { error } = await getSupabase().auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: getEmailRedirectUrl() },
+      })
       if (error) throw new Error(friendlyError(error))
       setCooldown(45)
       toast.success('Verification email resent')

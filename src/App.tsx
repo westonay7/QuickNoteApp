@@ -1,4 +1,4 @@
-import { Suspense, lazy, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, type ReactNode } from "react";
 import {
   createBrowserRouter,
   Navigate,
@@ -6,6 +6,7 @@ import {
   RouterProvider,
   Routes,
   useLocation,
+  useNavigate,
   useRouteError,
 } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/state/AuthContext";
@@ -13,6 +14,7 @@ import { DataProvider } from "@/state/DataContext";
 import { PrefsProvider } from "@/state/PrefsContext";
 import { ToastProvider } from "@/state/ToastContext";
 import { appUrl, getLastAppPath } from "@/lib/appUrl";
+import { clearPendingAuthCallback, getPendingAuthCallback } from "@/lib/authRedirect";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -101,6 +103,31 @@ function PublicOnly({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+function RecoveryRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    clearPendingAuthCallback();
+    navigate("/reset-password", { replace: true });
+  }, [navigate]);
+  return <FullPageSpinner label="Opening password reset…" />;
+}
+
+/**
+ * Intercepts Supabase email confirmation / auth redirects sent to the root URL
+ * (`https://westonay7.github.io/`) so verification completes and displays the
+ * confirmation screen instead of dropping straight onto Welcome or /app.
+ */
+function HomeOrAuthCallback() {
+  const callback = getPendingAuthCallback();
+  if (callback?.hasAuthParams) {
+    if (callback.type === "recovery" && !callback.error && !callback.errorCode) {
+      return <RecoveryRedirect />;
+    }
+    return <AuthCallback />;
+  }
+  return <Welcome />;
+}
+
 function GlobalErrorFallback(error: Error, reset: () => void) {
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-canvas px-4 text-center dark:bg-canvas-dark">
@@ -174,7 +201,7 @@ function AppRoutes() {
       <Suspense fallback={<RouteFallback />}>
       <Routes location={location}>
         {/* Public */}
-        <Route path="/" element={<Welcome />} />
+        <Route path="/" element={<HomeOrAuthCallback />} />
         <Route path="/introduction" element={<Introduction />} />
         <Route path="/signin" element={<PublicOnly><SignIn /></PublicOnly>} />
         <Route path="/signup" element={<PublicOnly><SignUp /></PublicOnly>} />
