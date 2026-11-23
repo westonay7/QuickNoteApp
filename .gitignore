@@ -20,12 +20,19 @@ dev-dist
 .env.*
 !.env.example
 
-# Android signing keys and build artifacts (never commit keystores)
+# Android signing keys and build artifacts (never commit keystores or build outputs)
 *.keystore
 *.jks
 signing-key-info.txt
 *.apk
 *.aab
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/captures/
+android/.cxx/
 
 # Editor directories and files
 .vscode/*

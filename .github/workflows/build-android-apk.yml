@@ -1,28 +1,15 @@
-name: Build Signed Android APK (Bubblewrap TWA)
+name: Build & Release Signed QuickNote Android APK
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
-      pwa_url:
-        description: 'Live PWA URL (leave blank to auto-detect your GitHub Pages URL)'
-        required: false
-        default: ''
-      package_id:
-        description: 'Android package ID'
-        required: false
-        default: 'io.github.westonay7.twa'
-      app_version:
-        description: 'Android versionName (e.g. 1.2.0)'
-        required: false
-        default: '1.2.0'
-      app_version_code:
-        description: 'Android versionCode (integer, increase for each update)'
-        required: false
-        default: '1'
-      release_tag:
-        description: 'Optional GitHub Release tag (e.g. v1.2.0) to also attach QuickNote-signed.apk'
-        required: false
-        default: ''
+      tag_name:
+        description: 'Version tag for the GitHub Release (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -31,16 +18,53 @@ jobs:
   build-android-apk:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate persistent signing key secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          MISSING=()
+          [ -z "$ANDROID_KEYSTORE_BASE64" ] && MISSING+=("ANDROID_KEYSTORE_BASE64")
+          [ -z "$ANDROID_KEYSTORE_PASSWORD" ] && MISSING+=("ANDROID_KEYSTORE_PASSWORD")
+          [ -z "$ANDROID_KEY_ALIAS" ] && MISSING+=("ANDROID_KEY_ALIAS")
+          [ -z "$ANDROID_KEY_PASSWORD" ] && MISSING+=("ANDROID_KEY_PASSWORD")
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Missing required GitHub Actions signing secrets: ${MISSING[*]}"
+            echo "This workflow requires a persistent Android signing keystore configured in GitHub Repository Secrets (Settings -> Secrets and variables -> Actions) and will never generate a temporary/ephemeral key."
+            exit 1
+          fi
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Decode and verify persistent keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_FILE="$RUNNER_TEMP/quicknote-release.keystore"
+          echo "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$KEYSTORE_FILE"
+          chmod 600 "$KEYSTORE_FILE"
+
+          keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -alias "$ANDROID_KEY_ALIAS" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            >/dev/null
+
+          echo "Persistent keystore verified for alias '$ANDROID_KEY_ALIAS'."
 
       - name: Prepare Android SDK & build-tools
         id: android_sdk
@@ -79,356 +103,197 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK" >> "$GITHUB_ENV"
           echo "$BT_DIR" >> "$GITHUB_PATH"
           echo "sdk_dir=$ANDROID_SDK" >> "$GITHUB_OUTPUT"
-          echo "build_tools=$BT_DIR" >> "$GITHUB_OUTPUT"
           echo "Using Android SDK: $ANDROID_SDK (build-tools: $BT_DIR)"
 
-      - name: Verify Live PWA & Build Bubblewrap TWA Manifest
-        id: pwa_audit
+      - name: Resolve release version and verify Bubblewrap TWA configuration
+        id: release_meta
         env:
-          INPUT_PWA_URL: ${{ github.event.inputs.pwa_url }}
-          PACKAGE_ID: ${{ github.event.inputs.package_id }}
-          APP_VERSION: ${{ github.event.inputs.app_version }}
-          APP_VERSION_CODE: ${{ github.event.inputs.app_version_code }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
+          INPUT_TAG: ${{ github.event.inputs.tag_name }}
         run: |
           set -euo pipefail
-          node <<'EOF'
-          const fs = require('node:fs');
-          const path = require('node:path');
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          else
+            TAG_NAME="${INPUT_TAG}"
+          fi
 
-          async function run() {
-            const owner = process.env.REPO_OWNER.toLowerCase();
-            const repo = process.env.REPO_NAME;
-            const defaultUrl = repo.toLowerCase() === `${owner}.github.io`
-              ? `https://${owner}.github.io/`
-              : `https://${owner}.github.io/${repo}/`;
+          if [ -z "$TAG_NAME" ]; then
+            echo "::error::Could not determine version tag."
+            exit 1
+          fi
 
-            let pwaUrlRaw = (process.env.INPUT_PWA_URL || '').trim() || defaultUrl;
-            if (!/^https?:\/\//i.test(pwaUrlRaw)) {
-              pwaUrlRaw = `https://${pwaUrlRaw}`;
-            }
-            if (!pwaUrlRaw.endsWith('/')) {
-              pwaUrlRaw += '/';
-            }
-            const pwaUrl = new URL(pwaUrlRaw);
-            console.log(`Auditing live PWA at: ${pwaUrl.href}`);
+          VERSION_NAME="${TAG_NAME#v}"
+          if [[ "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            VERSION_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+          else
+            VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          fi
 
-            // 1. Fetch HTML
-            const htmlRes = await fetch(pwaUrl.href, { headers: { Accept: 'text/html' } });
-            if (!htmlRes.ok) {
-              throw new Error(`Live PWA URL returned HTTP ${htmlRes.status}: ${pwaUrl.href}`);
-            }
-            const html = await htmlRes.text();
+          # Verify package ID consistency between Bubblewrap twa-manifest.json and Digital Asset Links
+          TWA_PKG="$(node -e "console.log(JSON.parse(require('fs').readFileSync('android/twa-manifest.json','utf8')).packageId)")"
+          DAL_PKG="$(node -e "console.log(JSON.parse(require('fs').readFileSync('public/.well-known/assetlinks.json','utf8'))[0].target.package_name)")"
+          DAL_FP="$(node -e "console.log(JSON.parse(require('fs').readFileSync('public/.well-known/assetlinks.json','utf8'))[0].target.sha256_cert_fingerprints[0])")"
 
-            // 2. Find Web App Manifest link
-            const manifestLinkMatch =
-              html.match(/<link[^>]+rel=["']manifest["'][^>]+href=["']([^"']+)["']/i) ||
-              html.match(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["']manifest["']/i);
-            if (!manifestLinkMatch) {
-              throw new Error(`No <link rel="manifest"> tag found in ${pwaUrl.href}`);
-            }
-            const manifestUrl = new URL(manifestLinkMatch[1], pwaUrl);
-            const manifestRes = await fetch(manifestUrl.href);
-            if (!manifestRes.ok) {
-              throw new Error(`Web App Manifest returned HTTP ${manifestRes.status}: ${manifestUrl.href}`);
-            }
-            const manifest = await manifestRes.json();
-            console.log(`Manifest OK: ${manifestUrl.href} (name="${manifest.name}", display="${manifest.display}")`);
+          if [ "$TWA_PKG" != "$DAL_PKG" ]; then
+            echo "::error::Package ID mismatch: android/twa-manifest.json ($TWA_PKG) != public/.well-known/assetlinks.json ($DAL_PKG)"
+            exit 1
+          fi
 
-            // 3. Verify Service Worker
-            const swMatch = html.match(/navigator\.serviceWorker\.register\(\s*['"]([^'"]+)['"]/);
-            const swUrl = new URL(swMatch ? swMatch[1] : 'sw.js', pwaUrl);
-            const swRes = await fetch(swUrl.href);
-            if (!swRes.ok) {
-              throw new Error(`Service worker returned HTTP ${swRes.status}: ${swUrl.href}`);
-            }
-            const swText = await swRes.text();
-            if (!swText || swText.trim().length < 20) {
-              throw new Error(`Service worker at ${swUrl.href} is empty.`);
-            }
-            console.log(`Service Worker OK: ${swUrl.href} (${swText.length} bytes)`);
+          # Apply tag versionName and versionCode to the Bubblewrap Gradle build
+          node -e '
+            const fs = require("node:fs");
+            const file = "android/app/build.gradle";
+            let gradle = fs.readFileSync(file, "utf8");
+            gradle = gradle.replace(/versionCode\s+\d+/, `versionCode ${process.argv[1]}`);
+            gradle = gradle.replace(/versionName\s+"[^"]*"/, `versionName "${process.argv[2]}"`);
+            fs.writeFileSync(file, gradle);
+          ' "$VERSION_CODE" "$VERSION_NAME"
 
-            // 4. Verify PNG icons (any & maskable)
-            const icons = Array.isArray(manifest.icons) ? manifest.icons : [];
-            const pickIcon = (purpose) => {
-              const candidates = icons.filter((ic) => {
-                const p = (ic.purpose || 'any').toLowerCase().split(/\s+/);
-                return p.includes(purpose) && /png/i.test(ic.type || ic.src || '');
-              });
-              candidates.sort((a, b) => {
-                const sa = parseInt(String(a.sizes || '0').split('x')[0], 10) || 0;
-                const sb = parseInt(String(b.sizes || '0').split('x')[0], 10) || 0;
-                return sb - sa;
-              });
-              return candidates[0] || null;
-            };
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "package_id=$TWA_PKG" >> "$GITHUB_OUTPUT"
+          echo "assetlinks_sha256=$DAL_FP" >> "$GITHUB_OUTPUT"
+          echo "Building QuickNote TWA ($TWA_PKG) version $VERSION_NAME (versionCode $VERSION_CODE) for tag $TAG_NAME"
 
-            const mainIcon = pickIcon('any') || icons[0];
-            if (!mainIcon || !mainIcon.src) {
-              throw new Error('Manifest is missing a valid PNG icon.');
-            }
-            const maskableIcon = pickIcon('maskable');
-
-            const iconUrl = new URL(mainIcon.src, manifestUrl).href;
-            const maskableIconUrl = maskableIcon ? new URL(maskableIcon.src, manifestUrl).href : iconUrl;
-
-            for (const testIcon of new Set([iconUrl, maskableIconUrl])) {
-              const iconRes = await fetch(testIcon);
-              if (!iconRes.ok) {
-                throw new Error(`Icon returned HTTP ${iconRes.status}: ${testIcon}`);
-              }
-              const buf = Buffer.from(await iconRes.arrayBuffer());
-              if (buf.length < 24 || buf.toString('hex', 0, 8) !== '89504e470d0a1a0a') {
-                throw new Error(`Icon is not a valid PNG image: ${testIcon}`);
-              }
-              console.log(`Icon OK: ${testIcon} (${buf.readUInt32BE(16)}x${buf.readUInt32BE(20)} PNG)`);
-            }
-
-            // 5. Build Bubblewrap twa-manifest.json
-            const startUrlObj = new URL(manifest.start_url || pwaUrl.pathname, manifestUrl);
-            const scopeUrlObj = new URL(manifest.scope || pwaUrl.pathname, manifestUrl);
-            const versionCode = Math.max(1, parseInt(process.env.APP_VERSION_CODE || '1', 10) || 1);
-            const appVersion = (process.env.APP_VERSION || '1.2.0').trim() || '1.2.0';
-            const packageId = (process.env.PACKAGE_ID || 'io.github.westonay7.twa').trim();
-
-            const shortcuts = Array.isArray(manifest.shortcuts)
-              ? manifest.shortcuts
-                  .filter((s) => s && s.name && s.url)
-                  .slice(0, 4)
-                  .map((s) => {
-                    const sIcon = Array.isArray(s.icons) && s.icons[0]?.src
-                      ? new URL(s.icons[0].src, manifestUrl).href
-                      : iconUrl;
-                    return {
-                      name: String(s.name),
-                      shortName: String(s.short_name || s.name).slice(0, 12),
-                      url: new URL(s.url, manifestUrl).pathname,
-                      chosenIconUrl: sIcon,
-                    };
-                  })
-              : [];
-
-            const twaManifest = {
-              packageId,
-              host: pwaUrl.host,
-              name: String(manifest.name || 'QuickNote'),
-              launcherName: String(manifest.short_name || 'QuickNote').slice(0, 12),
-              display: 'standalone',
-              displayOverride: ['standalone', 'minimal-ui'],
-              themeColor: String(manifest.theme_color || '#5145E5'),
-              themeColorDark: '#0F172A',
-              navigationColor: '#000000',
-              navigationColorDark: '#000000',
-              navigationDividerColor: '#000000',
-              navigationDividerColorDark: '#000000',
-              backgroundColor: String(manifest.background_color || '#F7F7FC'),
-              enableNotifications: false,
-              startUrl: `${startUrlObj.pathname}${startUrlObj.search}`,
-              iconUrl,
-              maskableIconUrl,
-              splashScreenFadeOutDuration: 300,
-              signingKey: {
-                path: path.resolve('twa-work/android.keystore'),
-                alias: 'quicknote',
-              },
-              appVersionCode: versionCode,
-              appVersion,
-              shortcuts,
-              generatorApp: 'bubblewrap-cli',
-              webManifestUrl: manifestUrl.href,
-              fallbackType: 'customtabs',
-              features: {},
-              alphaDependencies: { enabled: false },
-              enableSiteSettingsShortcut: true,
-              isChromeOSOnly: false,
-              isMetaQuest: false,
-              fullScopeUrl: scopeUrlObj.href,
-              minSdkVersion: 21,
-              orientation: 'any',
-              fingerprints: [],
-              additionalTrustedOrigins: [],
-              retainedBundles: [],
-            };
-
-            fs.mkdirSync('twa-work', { recursive: true });
-            fs.writeFileSync('twa-work/twa-manifest.json', JSON.stringify(twaManifest, null, 2));
-
-            const out = process.env.GITHUB_OUTPUT;
-            if (out) {
-              fs.appendFileSync(out, `pwa_url=${pwaUrl.href}\n`);
-              fs.appendFileSync(out, `manifest_url=${manifestUrl.href}\n`);
-              fs.appendFileSync(out, `sw_url=${swUrl.href}\n`);
-              fs.appendFileSync(out, `package_id=${packageId}\n`);
-              fs.appendFileSync(out, `app_version=${appVersion}\n`);
-              fs.appendFileSync(out, `app_version_code=${versionCode}\n`);
-            }
-          }
-
-          run().catch((err) => {
-            console.error(err);
-            process.exit(1);
-          });
-          EOF
-
-      - name: Generate Android TWA project with Google Bubblewrap
+      - name: Compile Release Android APK with Gradle
         env:
           ANDROID_SDK: ${{ steps.android_sdk.outputs.sdk_dir }}
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.bubblewrap" twa-work/project
-          cat > "$HOME/.bubblewrap/config.json" <<EOF
-          {
-            "jdkPath": "${JAVA_HOME}",
-            "androidSdkPath": "${ANDROID_SDK}"
-          }
-          EOF
-
-          npx --yes @bubblewrap/cli update \
-            --skipVersionUpgrade \
-            --manifest twa-work/twa-manifest.json \
-            --directory twa-work/project
-
-          printf 'sdk.dir=%s\n' "$ANDROID_SDK" > twa-work/project/local.properties
-
-      - name: Compile Release Android APK
-        run: |
-          set -euo pipefail
-          cd twa-work/project
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK" > android/local.properties
+          cd android
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Align, Sign, and Verify Android APK
+      - name: Align, Sign, and Verify QuickNote.apk
         id: sign_step
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_PKG: ${{ steps.release_meta.outputs.package_id }}
+          EXPECTED_SHA256: ${{ steps.release_meta.outputs.assetlinks_sha256 }}
         run: |
           set -euo pipefail
-          RAW_APK="twa-work/project/app/build/outputs/apk/release/app-release-unsigned.apk"
+          RAW_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           if [ ! -f "$RAW_APK" ]; then
             echo "::error::Compiled release APK not found at $RAW_APK"
             exit 1
           fi
 
+          ALIGNED_APK="$RUNNER_TEMP/QuickNote-aligned.apk"
+          SIGNED_APK="$RUNNER_TEMP/QuickNote.apk"
+          KEYSTORE_FILE="$RUNNER_TEMP/quicknote-release.keystore"
+
           # Align to 4-byte boundaries and 4096-byte page boundaries (required on Android 11+)
-          zipalign -p -f 4 "$RAW_APK" twa-work/aligned.apk
-          zipalign -c -p 4 twa-work/aligned.apk
+          zipalign -p -f 4 "$RAW_APK" "$ALIGNED_APK"
+          zipalign -c -p 4 "$ALIGNED_APK"
 
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > twa-work/release.keystore
-            KS_PATH="twa-work/release.keystore"
-            KS_ALIAS="$ANDROID_KEY_ALIAS"
-            KS_PASS="$ANDROID_KEYSTORE_PASSWORD"
-            KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
-            SIGNING_MODE="repository-secret-keystore"
-          else
-            KS_PATH="twa-work/ephemeral-release.keystore"
-            KS_ALIAS="quicknote"
-            KS_PASS="$(openssl rand -hex 24)"
-            KEY_PASS="$KS_PASS"
-            echo "::add-mask::$KS_PASS"
-
-            keytool -genkeypair -v \
-              -keystore "$KS_PATH" \
-              -storetype PKCS12 \
-              -alias "$KS_ALIAS" \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass "$KS_PASS" \
-              -keypass "$KEY_PASS" \
-              -dname "CN=QuickNote, OU=Mobile, O=QuickNote, L=Internet, S=NA, C=US" \
-              >/dev/null 2>&1
-            SIGNING_MODE="ephemeral-release-keystore"
-          fi
-
-          mkdir -p twa-work/output
+          # Sign with Android v1, v2, and v3 signature schemes using the persistent keystore
           apksigner sign \
-            --ks "$KS_PATH" \
-            --ks-key-alias "$KS_ALIAS" \
-            --ks-pass "pass:$KS_PASS" \
-            --key-pass "pass:$KEY_PASS" \
+            --ks "$KEYSTORE_FILE" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out twa-work/output/QuickNote-signed.apk \
-            twa-work/aligned.apk
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
 
-          rm -f twa-work/release.keystore twa-work/ephemeral-release.keystore
-
-          VERIFY_OUT="$(apksigner verify --verbose --print-certs twa-work/output/QuickNote-signed.apk)"
+          VERIFY_OUT="$(apksigner verify --verbose --print-certs "$SIGNED_APK")"
           echo "$VERIFY_OUT"
 
           SHA256_RAW="$(echo "$VERIFY_OUT" | grep -m1 'certificate SHA-256 digest:' | awk '{print $NF}' || true)"
           SHA256_COLON="$(echo "$SHA256_RAW" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g;s/:$//')"
 
-          echo "signing_mode=$SIGNING_MODE" >> "$GITHUB_OUTPUT"
-          echo "sha256=$SHA256_COLON" >> "$GITHUB_OUTPUT"
+          if command -v aapt2 >/dev/null 2>&1; then
+            BADGING="$(aapt2 dump badging "$SIGNED_APK" 2>/dev/null | head -n 1 || true)"
+            echo "APK badging: $BADGING"
+            ACTUAL_PKG="$(echo "$BADGING" | sed -n "s/.*name='\([^']*\)'.*/\1/p")"
+            if [ -n "$ACTUAL_PKG" ] && [ "$ACTUAL_PKG" != "$EXPECTED_PKG" ]; then
+              echo "::error::Built APK package ID ($ACTUAL_PKG) does not match expected ($EXPECTED_PKG)"
+              exit 1
+            fi
+          fi
 
-      - name: Upload QuickNote-signed.apk Artifact
+          FP_MATCH="unknown"
+          if [ -n "$SHA256_COLON" ] && [ -n "$EXPECTED_SHA256" ]; then
+            if [ "$SHA256_COLON" = "$EXPECTED_SHA256" ]; then
+              FP_MATCH="matched"
+              echo "SHA-256 certificate fingerprint matches public/.well-known/assetlinks.json."
+            else
+              FP_MATCH="mismatch"
+              echo "::warning::Signing key SHA-256 ($SHA256_COLON) differs from public/.well-known/assetlinks.json ($EXPECTED_SHA256). Update assetlinks.json or use the matching keystore so TWA verification removes the browser bar."
+            fi
+          fi
+
+          echo "apk_path=$SIGNED_APK" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256_COLON" >> "$GITHUB_OUTPUT"
+          echo "fp_match=$FP_MATCH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload QuickNote.apk Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QuickNote-signed-apk
-          path: twa-work/output/QuickNote-signed.apk
+          name: QuickNote-apk
+          path: ${{ steps.sign_step.outputs.apk_path }}
           retention-days: 30
 
-      - name: Attach APK to GitHub Release (Optional)
-        if: github.event.inputs.release_tag != ''
+      - name: Attach QuickNote.apk to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.event.inputs.release_tag }}
-          APP_VERSION: ${{ steps.pwa_audit.outputs.app_version }}
+          TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
+          VERSION_NAME: ${{ steps.release_meta.outputs.version_name }}
+          APK_PATH: ${{ steps.sign_step.outputs.apk_path }}
+          PACKAGE_ID: ${{ steps.release_meta.outputs.package_id }}
+          SHA256: ${{ steps.sign_step.outputs.sha256 }}
         run: |
           set -euo pipefail
           if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" twa-work/output/QuickNote-signed.apk --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG_NAME" "$APK_PATH" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG_NAME" twa-work/output/QuickNote-signed.apk \
+            NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+            {
+              echo "Signed Android Trusted Web Activity APK built with Google Bubblewrap."
+              echo ""
+              echo "- **Package ID:** \`${PACKAGE_ID}\`"
+              echo "- **Version:** \`${VERSION_NAME}\`"
+              echo "- **SHA-256 Fingerprint:** \`${SHA256}\`"
+              echo "- **Direct Download:** https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/QuickNote.apk"
+            } > "$NOTES_FILE"
+            gh release create "$TAG_NAME" "$APK_PATH" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "QuickNote Android v${APP_VERSION}" \
-              --notes "Signed Android TWA APK built directly with Google Bubblewrap (aligned + verified with Android v1/v2/v3 signatures)."
+              --target "$GITHUB_SHA" \
+              --title "QuickNote Android ${TAG_NAME}" \
+              --notes-file "$NOTES_FILE"
           fi
 
-      - name: Write Build & PWA Summary
+      - name: Write Release Summary
         env:
-          PWA_URL: ${{ steps.pwa_audit.outputs.pwa_url }}
-          MANIFEST_URL: ${{ steps.pwa_audit.outputs.manifest_url }}
-          SW_URL: ${{ steps.pwa_audit.outputs.sw_url }}
-          PACKAGE_ID: ${{ steps.pwa_audit.outputs.package_id }}
-          APP_VERSION: ${{ steps.pwa_audit.outputs.app_version }}
-          APP_VERSION_CODE: ${{ steps.pwa_audit.outputs.app_version_code }}
-          SIGNING_MODE: ${{ steps.sign_step.outputs.signing_mode }}
+          TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
+          VERSION_NAME: ${{ steps.release_meta.outputs.version_name }}
+          VERSION_CODE: ${{ steps.release_meta.outputs.version_code }}
+          PACKAGE_ID: ${{ steps.release_meta.outputs.package_id }}
           SHA256: ${{ steps.sign_step.outputs.sha256 }}
-          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          FP_MATCH: ${{ steps.sign_step.outputs.fp_match }}
         run: |
           {
-            echo "## QuickNote Android APK Built & Verified"
+            echo "## QuickNote Android APK Released"
             echo ""
-            echo "Built directly with Google Bubblewrap (no PWABuilder server required)."
-            echo ""
-            echo "### PWA Audit"
-            echo "- **Live URL:** ${PWA_URL} (200 OK)"
-            echo "- **Web App Manifest:** ${MANIFEST_URL} (Valid JSON + PNG icons)"
-            echo "- **Service Worker:** ${SW_URL} (200 OK)"
-            echo ""
-            echo "### Signed Android APK"
-            echo "- **Artifact:** \`QuickNote-signed-apk\` -> \`QuickNote-signed.apk\` (aligned + Android v1/v2/v3 verified)"
+            echo "- **Release Tag:** \`${TAG_NAME}\`"
+            echo "- **APK File:** \`QuickNote.apk\` (aligned + Android v1/v2/v3 verified)"
             echo "- **Package ID:** \`${PACKAGE_ID}\`"
-            echo "- **Version:** \`${APP_VERSION}\` (versionCode \`${APP_VERSION_CODE}\`)"
-            echo "- **Signing Mode:** \`${SIGNING_MODE}\`"
-            if [ -n "$SHA256" ]; then
-              echo "- **SHA-256 Certificate Fingerprint:** \`${SHA256}\`"
-            fi
-            if [ -n "$RELEASE_TAG" ]; then
-              echo "- **GitHub Release:** \`${RELEASE_TAG}\` (APK attached)"
-            fi
-            echo ""
-            echo "Download **\`QuickNote-signed-apk\`** from the **Artifacts** section below, unzip it, and install **\`QuickNote-signed.apk\`** on your Android phone."
-            if [ "$SIGNING_MODE" = "ephemeral-release-keystore" ]; then
-              echo ""
-              echo "> **Tip for future updates & TWA verification:** To keep the exact same signing key and SHA-256 fingerprint across builds, save your keystore in GitHub Repository Secrets (\`ANDROID_KEYSTORE_BASE64\`, \`ANDROID_KEYSTORE_PASSWORD\`, \`ANDROID_KEY_ALIAS\`, \`ANDROID_KEY_PASSWORD\`)."
-            fi
+            echo "- **Version:** \`${VERSION_NAME}\` (versionCode \`${VERSION_CODE}\`)"
+            echo "- **SHA-256 Certificate Fingerprint:** \`${SHA256}\`"
+            echo "- **Digital Asset Links Check:** \`${FP_MATCH}\`"
+            echo "- **Direct APK Download URL:** https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/QuickNote.apk"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up temporary keystore
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/quicknote-release.keystore" "$RUNNER_TEMP/QuickNote-aligned.apk" android/local.properties

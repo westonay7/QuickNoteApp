@@ -1,0 +1,65 @@
+{
+  "packageId": "io.github.westonay7.twa",
+  "host": "westonay7.github.io",
+  "name": "QuickNote - Notes App",
+  "launcherName": "QuickNote",
+  "display": "standalone",
+  "displayOverride": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "themeColor": "#5145E5",
+  "themeColorDark": "#0F172A",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#F7F7FC",
+  "enableNotifications": false,
+  "startUrl": "/",
+  "iconUrl": "https://westonay7.github.io/pwa-512x512.png",
+  "maskableIconUrl": "https://westonay7.github.io/pwa-maskable-512x512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "android"
+  },
+  "appVersionCode": 1,
+  "appVersion": "1.0.0",
+  "shortcuts": [
+    {
+      "name": "New Note",
+      "shortName": "New Note",
+      "url": "https://westonay7.github.io/app/notes/new",
+      "chosenIconUrl": "https://westonay7.github.io/pwa-192x192.png"
+    },
+    {
+      "name": "Search Notes",
+      "shortName": "Search",
+      "url": "https://westonay7.github.io/app/search",
+      "chosenIconUrl": "https://westonay7.github.io/pwa-192x192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://westonay7.github.io/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://westonay7.github.io/",
+  "minSdkVersion": 21,
+  "orientation": "any",
+  "fingerprints": [
+    {
+      "name": "release",
+      "value": "FF:52:E4:5E:25:9E:39:C2:BC:BF:42:EC:06:93:94:0E:FE:EB:0C:6F:71:16:4B:16:FB:09:27:B0:A4:70:4F:5A"
+    }
+  ],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "launchHandlerClientMode": "navigate-existing"
+}
